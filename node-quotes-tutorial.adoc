@@ -1,0 +1,304 @@
+= Simple, Value Entity API (NodeJS)
+
+include::ROOT:partial$include.adoc[]
+
+The tutorial assumes that you have an https://console.akkaserverless.com/[Akka Serverless account], the https://developer.lightbend.com/docs/akka-serverless/getting-started/set-up-development-env.html#_akka_serverless_cli[Akka Servless CLI] installed and https://docs.docker.com/get-docker/[Docker] running on your machine . No point in reading any further until you have these ready to use!
+
+* <<overview,Overview>>
+* <<overview,Get Started>>
+* <<schema,Define Schema>>
+* <<api,Define API Signatures>>
+* <<code,Code API Logic>>
+* <<run-the-api-endpoints,Run the API>>
+* <<use-the-api,Use the API>>
+* <<deploy-the-api,Deploy the API>>
+
+== <<overview,>>Overview
+
+In this tutorial let's build a simple API to manage the famous quotes from famous authors. This is inspired by the https://deno.com/deploy/docs/tutorial-faunadb[Deno Deploy tutorial]. We will be using Value Entities and Views as the primary components of our API. The data of course will be persisted and also available for simple querying. At the end of this tutorial, you should have a good understanding on how to create similar types of APIs.
+
+== <<overview,>>Get Started
+
+Let's start by creating our project. You can definitely https://developer.lightbend.com/docs/akka-serverless/getting-started/code-generation.html[generate code] using Akka Servless code generation tooling. But for time's sake, and to keep a focus on the specific coding we want to do, this tutorial leverages a Github repository as the starting point.
+
+[source,sh]
+----
+git clone git@github.com:jpollock/quotes-service.git
+----
+
+[source,sh]
+----
+cd quotes-service && npm install && npm run build
+----
+
+Now open up the project in your favorite editor. We love VS Code but whatever is your pleasure!
+
+== <<schema,>>Define Schema
+
+First step in the development process is defining what data we want to manage, or interact with, in our API. We use `Protobuf` to do this. Modify the proto/mydomain.proto file to include a new type of data; in this case, we are wanting to manage famous quotes from authors, and, as such, we want to track data associated with `author` and the actual quotation `text`. We can pick our domain model name,`Quote`, and then add in the attibutes.
+
+This is, in essence, both our API request data as well as our database table schema. But no further work will be required to set that up!
+
+Your updated file should look like the below.
+
+[source,sh]
+----
+syntax = "proto3";
+
+import "akkaserverless/annotations.proto";
+
+package com.example;
+
+message Thing {
+    string thing_id = 1 [(akkaserverless.field).entity_key = true];
+    Data data = 2;
+}
+
+message Quote {
+    string quote_id = 1 [(akkaserverless.field).entity_key = true];
+    Data data = 2;
+}
+
+message Data {
+    string author = 1;
+    string text = 2;
+}
+----
+
+NOTE: In this tutorial, we are not making big changes to other parts of the project. This keeps the project in a runnable state. But there is code present that is not directly connected to this tutorial. For example, in the above code, there is still a `Thing` message defined. That is used elsewhere in the project and we keep in order for other code to not break. Beyond this tutorial exercise, feel free to go in and delete as you want!
+
+== <<api,>>Define API Signatures
+
+Modify the proto/myvalueentity.proto file, replacing `Thing` and `thing` with `Quote` and `quote`. You could also go `sed` on the file if you would like. 
+
+[source,sh]
+----
+sed -i '' 's/thing/quote/' proto/myvalueentity.proto
+sed -i '' 's/Thing/Quote/' proto/myvalueentity.proto
+----
+
+Your updated file should look like the below. Beyond the `Protobuf` boileplate, the key code to focus on is within the `service MyServiceValueEntity` section of the file. The `rpc` entries define what API calls will be supported, and what their inputs and outputs are.
+
+[source,sh]
+----
+// This is the public API offered by your entity.
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "akkaserverless/annotations.proto";
+import "google/api/annotations.proto";
+
+import "mydomain.proto";
+
+package com.example;
+
+option go_package = "$packageInPathFormat";
+option java_outer_classname = "MyValueEntity";
+
+message GetValueStateCommand {
+    string quote_id = 1 [(akkaserverless.field).entity_key = true];
+}
+
+service MyServiceValueEntity {
+    rpc SetData(Quote) returns (google.protobuf.Empty) {
+        option (google.api.http) = {
+            put: "/value/quotes/{quote_id}"
+            body: "*"
+        };    
+    }
+    rpc GetData(GetValueStateCommand) returns (Data) {
+        option (google.api.http) = {
+            get: "/value/quotes/{quote_id}"
+        };    
+
+    }
+}
+----
+
+Modify the proto/myvalueview.proto, replacing `Thing` and `thing` with `Quote` and `quote`. You could also go `sed` on the file if you would like.
+
+[source,sh]
+----
+sed -i '' 's/thing/quote/' proto/myvalueview.proto
+sed -i '' 's/Thing/Quote/' proto/myvalueview.proto
+----
+
+Your updated file should look like the below. The first `rpc` API defined is an event driven one, intended to pick up new and modified `quote` data and feed that into an optimized query service; we call this a View. The second `rpc` API defined is a normal request-style one,  in which the specified query will be executed in order to generate a set of results.
+
+[source,js]
+----
+// This is the public API offered by your entity.
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "akkaserverless/annotations.proto";
+import "google/api/annotations.proto";
+
+import "mydomain.proto";
+
+package com.example;
+
+option go_package = "$packageInPathFormat";
+option java_outer_classname = "MyValueView";
+
+service MyServiceValueView {
+    rpc UpdateQuote(Quote) returns (Quote) {
+        option (akkaserverless.method).eventing = {
+          in: {
+            value_changes: "value_quotes"
+          }
+        };
+        option (akkaserverless.method).view.update = {
+          table: "value_quotes"
+        };
+    }
+
+    rpc GetQuotes(google.protobuf.Empty) returns (stream Quote) {
+        option (akkaserverless.method).view.query = {
+          query: "select * from value_quotes"
+        };
+        option (google.api.http) = {
+            get: "/value/quotes"
+          };
+    }
+}
+----
+
+== <<code,>>Code API Logic
+
+Modify the src/myvalueentity.js, replacing `Thing` and `thing` with `Quote` and `quote`. You could also go `sed` on the file if you would like.
+
+[source,sh]
+----
+sed -i '' 's/thing/quote/' proto/myvalueentity.proto
+sed -i '' 's/Thing/Quote/' proto/myvalueentity.proto
+----
+
+Your updated file should look like the below. The `commandHandlers` section is a critical entry point to the logic; this is the connection to the `rpc` API signatures created above. Each `commandHandler` maps to a `function`. The two functions below are very simple. `setData` takes the incoming `quote` data and saves it to database. `getData` retrieves the data from the database and returns some of that data to the API caller.
+
+NOTE: In the below code, database connection and transactions are transparent. Akka Serverless manages this automatically for you. The `entityId` in the code `entity.initial = (entityId)` is your database record identifier. But Akka Serverless knows that automatically as part of the API request signature and uses that during the save and fetch processing.
+
+
+[source,js]
+----
+/*
+ * Copyright 2019 Lightbend Inc.
+ */
+
+const ValueEntity = require("@lightbend/akkaserverless-javascript-sdk").ValueEntity;
+
+const entity = new ValueEntity(
+  [
+    "myvalueentity.proto"
+  ],
+  "com.example.MyServiceValueEntity",
+  "value_quotes",
+  {
+    includeDirs: ["./proto"],
+    serializeFallbackToJson: true
+  }
+);
+
+
+const pkg = "com.example.";
+const Quote = entity.lookupType(pkg + "Quote");
+
+entity.initial = (entityId) => Quote.create({quote_id: entityId});
+
+entity.commandHandlers = {
+  SetData: setData,
+  GetData: getData
+}
+function setData(update, state, ctx) {
+  update.quoteId = ctx.entityId;
+  ctx.updateState(Quote.create(update));
+  return {};
+}
+
+function getData(request, quote) {
+  return quote.data;
+}
+
+// Export the entity
+module.exports = entity;
+----
+
+Modify the src/myvalueview.js, replacing `Thing` and `thing` with `Quote` and `quote`. You could also go `sed` on the file if you would like.
+
+[source,sh]
+----
+sed -i '' 's/thing/quote/' src/myvalueview.js
+sed -i '' 's/Thing/Quote/' src/myvalueview.js
+----
+
+Your updated file should look like the below. In this case, we are just ensuring that the automatically generated `View` - the part of Akka Serverless that will serve the queries submitted - can connect to the `value_quotes` event stream.
+
+[source,js]
+----
+const View = require("@lightbend/akkaserverless-javascript-sdk").View;
+
+const entity = new View(
+  ["myvalueview.proto"],
+  "com.example.MyServiceValueView",
+  {
+    viewId: "value_quotes",
+    includeDirs: ["./proto"]
+  }
+);
+
+module.exports = entity;
+----
+
+== <<run-the-api-endpoints,>>Run the API
+
+Now our API is ready to be run.
+
+Start the API service through the following `npm` commands.
+
+[source,sh]
+----
+npm run build & npm run start
+----
+
+Akka Serverless uses a proxy sidecar for the supporting capabilities like distributed data management, view setup and querying as well as the eventing feature (and more!). For local development we can use a version of this proxy that is substantially complete but will not persist data across restarts. We can run this proxy using Docker.
+
+[source,sh]
+----
+docker-compose up -d
+----
+
+== <<use-the-api,>>Use the API
+
+Assuming you have been successful in running the API locally, the following `curl` commands will work. The first two will create data and the last one executes the query.
+
+[source,sh]
+----
+curl -H "Content-Type: application/json" --request PUT --data '{"data":{"text": "A program that has not been tested does not work.", "author": "Bjarne Stroustrup"}}' http://localhost:9000/value/quotes/1
+----
+
+[source,sh]
+----
+curl -H "Content-Type: application/json" --request PUT --data '{"data":{"text": "Do not judge each day by the harvest you reap but by the seeds that you plant.", "author": "Robert Louis Stevenson"}}' http://localhost:9000/value/quotes/2
+----
+
+[source,sh]
+----
+curl -H "Content-Type: application/json" --request GET http://localhost:9000/value/quotes
+----
+
+== <<deploy-the-api,>>Deploy the API
+
+Modify package.json to change to a docker repo name that you want. For example:
+
+Change
+`"dockerImage": "my-docker-repo/akka-serverless-starter-javascript",`
+
+To
+`"dockerImage": "myname/quote-service",`
+
+[source,sh]
+----
+npm run package & npm run deploy
+----
+
+Go to https://console.akkaserverless.com[Akka Serverless Console] to manage further or use the `akkasls` to manage from the command line.
